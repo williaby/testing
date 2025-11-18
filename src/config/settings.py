@@ -120,6 +120,27 @@ class CloudflareSettings(BaseSettings):
         description="Header containing authenticated user email",
     )
 
+    # Cookie Configuration
+    cookie_domain: str | None = Field(
+        default=None,
+        description="Domain for session cookies (e.g., '.example.com'). None = current domain",
+    )
+
+    cookie_path: str = Field(
+        default="/",
+        description="Path for session cookies",
+    )
+
+    cookie_secure: bool = Field(
+        default=True,
+        description="Require HTTPS for cookies (should be True in production)",
+    )
+
+    cookie_samesite: str = Field(
+        default="strict",
+        description="SameSite cookie attribute (strict, lax, or none)",
+    )
+
     @field_validator("cloudflare_team_domain")
     @classmethod
     def validate_team_domain(cls, v: str) -> str:

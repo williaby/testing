@@ -47,7 +47,7 @@ from src.cloudflare_auth.csrf import CSRFProtection
 from src.cloudflare_auth.models import CloudflareUser
 from src.cloudflare_auth.rate_limiter import InMemoryRateLimiter
 from src.cloudflare_auth.sessions import SimpleSessionManager
-from src.cloudflare_auth.utils import sanitize_email, sanitize_ip, sanitize_path
+from src.cloudflare_auth.utils import get_client_ip, sanitize_email, sanitize_ip, sanitize_path
 from src.cloudflare_auth.validators import CloudflareJWTValidator
 from src.cloudflare_auth.whitelist import EmailWhitelistValidator, UserTier
 from src.config.settings import CloudflareSettings, get_cloudflare_settings
@@ -244,7 +244,7 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
         """
         # Check rate limit
         if self.enable_rate_limiting and self.rate_limiter:
-            client_ip = self._get_client_ip(request)
+            client_ip = get_client_ip(request)
             if not self.rate_limiter.is_allowed(client_ip):
                 retry_after = self.rate_limiter.get_retry_after(client_ip)
                 logger.warning(
@@ -279,7 +279,7 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
                         "Missing JWT header: %s (path: %s, ip: %s)",
                         self.settings.jwt_header_name,
                         sanitize_path(request.url.path),
-                        sanitize_ip(self._get_client_ip(request)),
+                        sanitize_ip(get_client_ip(request)),
                     )
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -309,7 +309,7 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
         except ValueError as e:
             # Record failed authentication attempt for rate limiting
             if self.enable_rate_limiting and self.rate_limiter:
-                client_ip = self._get_client_ip(request)
+                client_ip = get_client_ip(request)
                 self.rate_limiter.record_attempt(client_ip)
 
             if self.settings.log_auth_failures:
@@ -317,7 +317,7 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
                     "JWT validation failed: %s (path: %s, ip: %s)",
                     str(e),
                     sanitize_path(request.url.path),
-                    sanitize_ip(self._get_client_ip(request)),
+                    sanitize_ip(get_client_ip(request)),
                 )
 
             if self.require_auth:
@@ -420,19 +420,30 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
     def _set_session_cookie(self, response: Response, session_id: str) -> None:
         """Set session cookie and CSRF token in response.
 
+        Uses security settings from configuration for proper cookie attributes.
+
         Args:
             response: Response to modify
             session_id: Session ID to set
         """
+        # Prepare cookie kwargs from settings
+        cookie_kwargs = {
+            "max_age": self.session_manager.session_timeout,
+            "path": self.settings.cookie_path,
+            "secure": self.settings.cookie_secure,
+            "samesite": self.settings.cookie_samesite,
+        }
+
+        # Add domain if configured
+        if self.settings.cookie_domain:
+            cookie_kwargs["domain"] = self.settings.cookie_domain
+
         # Set session cookie (httponly for security)
         response.set_cookie(
             key="session_id",
             value=session_id,
             httponly=True,
-            secure=True,
-            samesite="strict",
-            max_age=self.session_manager.session_timeout,
-            path="/",
+            **cookie_kwargs,
         )
 
         # Set CSRF token cookie (NOT httponly, needs to be readable by JS)
@@ -442,36 +453,8 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
                 key="csrf_token",
                 value=csrf_token,
                 httponly=False,  # Must be readable by JavaScript
-                secure=True,
-                samesite="strict",
-                max_age=self.session_manager.session_timeout,
-                path="/",
+                **cookie_kwargs,
             )
-
-    def _get_client_ip(self, request: Request) -> str:
-        """Extract client IP address from request.
-
-        Args:
-            request: Incoming request
-
-        Returns:
-            Client IP address
-        """
-        # Cloudflare specific headers
-        cf_connecting_ip = request.headers.get("CF-Connecting-IP")
-        if cf_connecting_ip:
-            return cf_connecting_ip
-
-        # Standard forwarding headers
-        forwarded_for = request.headers.get("X-Forwarded-For")
-        if forwarded_for:
-            return forwarded_for.split(",")[0].strip()
-
-        real_ip = request.headers.get("X-Real-IP")
-        if real_ip:
-            return real_ip.strip()
-
-        return request.client.host if request.client else "unknown"
 
 
 def setup_cloudflare_auth_enhanced(

@@ -218,3 +218,36 @@ def mask_sensitive_data(text: str, pattern: str = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0
         return '*' * len(matched)
 
     return re.sub(pattern, mask_match, text)
+
+
+def get_client_ip(request) -> str:
+    """Extract client IP address from request.
+
+    SECURITY NOTE: Only trusts CF-Connecting-IP header from Cloudflare.
+    Other forwarding headers (X-Forwarded-For, X-Real-IP) are NOT trusted
+    to prevent IP spoofing attacks. This assumes the application is behind
+    Cloudflare Access.
+
+    Args:
+        request: FastAPI/Starlette Request object
+
+    Returns:
+        Client IP address string
+
+    Example:
+        >>> from fastapi import Request
+        >>> ip = get_client_ip(request)
+        >>> print(f"Client IP: {ip}")
+    """
+    # ONLY trust Cloudflare's CF-Connecting-IP header
+    # This is set by Cloudflare and cannot be spoofed by clients
+    cf_connecting_ip = request.headers.get("CF-Connecting-IP")
+    if cf_connecting_ip:
+        return cf_connecting_ip.strip()
+
+    # Fall back to direct client IP if not behind Cloudflare
+    # (e.g., development/testing environments)
+    if request.client and request.client.host:
+        return request.client.host
+
+    return "unknown"
