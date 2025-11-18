@@ -52,6 +52,14 @@ from src.cloudflare_auth.whitelist import (
     create_validator_from_env,
 )
 
+# Optional Redis session manager (requires redis package)
+try:
+    from src.cloudflare_auth.redis_sessions import RedisSessionManager
+    _REDIS_AVAILABLE = True
+except ImportError:
+    RedisSessionManager = None  # type: ignore
+    _REDIS_AVAILABLE = False
+
 __all__ = [
     # Middleware
     "CloudflareAuthMiddleware",
@@ -75,3 +83,7 @@ __all__ = [
     "require_admin",
     "require_tier",
 ]
+
+# Add RedisSessionManager if available
+if _REDIS_AVAILABLE and RedisSessionManager is not None:
+    __all__.append("RedisSessionManager")

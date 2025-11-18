@@ -31,6 +31,20 @@ class SimpleSessionManager:
     This manager provides session tracking for authenticated users,
     maintaining session state and handling expiration.
 
+    ⚠️ SECURITY WARNING:
+        This in-memory implementation is NOT suitable for production use:
+        - Sessions are lost on application restart
+        - Not shared across multiple instances
+        - No persistent storage
+        - Limited scalability
+
+        For production, use RedisSessionManager (see examples) or similar
+        distributed session storage with:
+        - Persistence across restarts
+        - Shared state across instances
+        - Session fixation protection
+        - Secure session lifecycle management
+
     Note:
         Sessions are stored in memory and will be lost on application restart.
         For production use with multiple instances, consider using a distributed

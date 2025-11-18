@@ -23,6 +23,7 @@ Called by:
 from dataclasses import dataclass
 from enum import Enum
 import logging
+import secrets
 from typing import Any
 
 from pydantic import BaseModel, field_validator
@@ -235,6 +236,8 @@ class EmailWhitelistValidator:
     def is_authorized(self, email: str) -> bool:
         """Check if email is authorized via whitelist.
 
+        Uses constant-time comparison to prevent timing attacks.
+
         Args:
             email: Email address to validate
 
@@ -246,23 +249,27 @@ class EmailWhitelistValidator:
 
         normalized_email = self._normalize_email(email)
 
-        # Check individual email whitelist
-        if normalized_email in self.individual_emails:
-            logger.debug("Email %s authorized via individual whitelist", email)
-            return True
+        # Check individual email whitelist using constant-time comparison
+        for allowed_email in self.individual_emails:
+            if secrets.compare_digest(normalized_email, allowed_email):
+                logger.debug("Email %s authorized via individual whitelist", email)
+                return True
 
-        # Check domain patterns
+        # Check domain patterns using constant-time comparison
         if "@" in normalized_email:
             domain = "@" + normalized_email.split("@")[1]
-            if domain in self.domain_patterns:
-                logger.debug("Email %s authorized via domain pattern %s", email, domain)
-                return True
+            for allowed_domain in self.domain_patterns:
+                if secrets.compare_digest(domain, allowed_domain):
+                    logger.debug("Email %s authorized via domain pattern %s", email, domain)
+                    return True
 
         logger.debug("Email %s not authorized", email)
         return False
 
     def is_admin(self, email: str) -> bool:
         """Check if email has admin privileges.
+
+        Uses constant-time comparison to prevent timing attacks.
 
         Args:
             email: Email address to check
@@ -274,12 +281,14 @@ class EmailWhitelistValidator:
             return False
 
         normalized_email = self._normalize_email(email)
-        is_admin_user = normalized_email in self.admin_emails
 
-        if is_admin_user:
-            logger.debug("Email %s has admin privileges", email)
+        # Use constant-time comparison to prevent timing attacks
+        for admin_email in self.admin_emails:
+            if secrets.compare_digest(normalized_email, admin_email):
+                logger.debug("Email %s has admin privileges", email)
+                return True
 
-        return is_admin_user
+        return False
 
     def get_user_role(self, email: str) -> str:
         """Get user role based on email.

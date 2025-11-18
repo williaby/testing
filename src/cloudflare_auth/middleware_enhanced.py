@@ -43,7 +43,9 @@ from typing import Any
 from fastapi import HTTPException, Request, Response, status
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from src.cloudflare_auth.csrf import CSRFProtection
 from src.cloudflare_auth.models import CloudflareUser
+from src.cloudflare_auth.rate_limiter import InMemoryRateLimiter
 from src.cloudflare_auth.sessions import SimpleSessionManager
 from src.cloudflare_auth.validators import CloudflareJWTValidator
 from src.cloudflare_auth.whitelist import EmailWhitelistValidator, UserTier
@@ -83,6 +85,9 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
         excluded_paths: list[str] | None = None,
         enable_sessions: bool = True,
         require_auth: bool = True,
+        enable_rate_limiting: bool = True,
+        rate_limit_attempts: int = 5,
+        rate_limit_window: int = 60,
     ) -> None:
         """Initialize enhanced authentication middleware.
 
@@ -95,6 +100,9 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
             excluded_paths: Paths to exclude from authentication
             enable_sessions: Whether to use session cookies
             require_auth: Whether authentication is required
+            enable_rate_limiting: Whether to enable rate limiting (default: True)
+            rate_limit_attempts: Max authentication attempts per window (default: 5)
+            rate_limit_window: Rate limit window in seconds (default: 60)
         """
         super().__init__(app)
         self.settings = settings or get_cloudflare_settings()
@@ -105,6 +113,22 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
         self.enable_sessions = enable_sessions
         self.require_auth = require_auth
 
+        # Rate limiting
+        self.enable_rate_limiting = enable_rate_limiting
+        if enable_rate_limiting:
+            self.rate_limiter = InMemoryRateLimiter(
+                max_attempts=rate_limit_attempts,
+                window_seconds=rate_limit_window,
+            )
+        else:
+            self.rate_limiter = None
+
+        # CSRF protection for sessions
+        if enable_sessions:
+            self.csrf_protection = CSRFProtection()
+        else:
+            self.csrf_protection = None
+
         # Validate configuration
         if self.settings.cloudflare_enabled and require_auth:
             if not whitelist_validator:
@@ -114,10 +138,11 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
 
         logger.info(
             "Initialized enhanced Cloudflare auth middleware "
-            "(JWT enabled=%s, sessions=%s, whitelist=%s)",
+            "(JWT enabled=%s, sessions=%s, whitelist=%s, rate_limiting=%s)",
             self.settings.cloudflare_enabled,
             self.enable_sessions,
             whitelist_validator is not None,
+            self.enable_rate_limiting,
         )
 
     def _is_path_excluded(self, path: str) -> bool:
@@ -216,6 +241,22 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
         Raises:
             HTTPException: If authentication fails and is required
         """
+        # Check rate limit
+        if self.enable_rate_limiting and self.rate_limiter:
+            client_ip = self._get_client_ip(request)
+            if not self.rate_limiter.is_allowed(client_ip):
+                retry_after = self.rate_limiter.get_retry_after(client_ip)
+                logger.warning(
+                    "Rate limit exceeded for IP: %s (path: %s)",
+                    client_ip,
+                    request.url.path,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many authentication attempts. Please try again later.",
+                    headers={"Retry-After": str(retry_after)},
+                )
+
         # Check for existing session first
         if self.enable_sessions:
             session_id = request.cookies.get("session_id")
@@ -250,6 +291,11 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
         try:
             claims = self.jwt_validator.validate_token(jwt_token)
         except ValueError as e:
+            # Record failed authentication attempt for rate limiting
+            if self.enable_rate_limiting and self.rate_limiter:
+                client_ip = self._get_client_ip(request)
+                self.rate_limiter.record_attempt(client_ip)
+
             if self.settings.log_auth_failures:
                 logger.warning(
                     "JWT validation failed: %s (path: %s, ip: %s)",
@@ -259,9 +305,10 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
                 )
 
             if self.require_auth:
+                # Don't leak error details to potential attackers
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=f"Invalid authentication token: {str(e)}",
+                    detail="Invalid authentication token",
                     headers={"WWW-Authenticate": "Bearer"},
                 ) from e
             return None
@@ -355,12 +402,13 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
         )
 
     def _set_session_cookie(self, response: Response, session_id: str) -> None:
-        """Set session cookie in response.
+        """Set session cookie and CSRF token in response.
 
         Args:
             response: Response to modify
             session_id: Session ID to set
         """
+        # Set session cookie (httponly for security)
         response.set_cookie(
             key="session_id",
             value=session_id,
@@ -368,7 +416,21 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
             secure=True,
             samesite="strict",
             max_age=self.session_manager.session_timeout,
+            path="/",
         )
+
+        # Set CSRF token cookie (NOT httponly, needs to be readable by JS)
+        if self.csrf_protection:
+            csrf_token = self.csrf_protection.generate_token(session_id)
+            response.set_cookie(
+                key="csrf_token",
+                value=csrf_token,
+                httponly=False,  # Must be readable by JavaScript
+                secure=True,
+                samesite="strict",
+                max_age=self.session_manager.session_timeout,
+                path="/",
+            )
 
     def _get_client_ip(self, request: Request) -> str:
         """Extract client IP address from request.
