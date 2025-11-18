@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # Your FastAPI application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cloudflare-auth-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - CLOUDFLARE_TEAM_DOMAIN=${CLOUDFLARE_TEAM_DOMAIN}
+      - CLOUDFLARE_AUDIENCE_TAG=${CLOUDFLARE_AUDIENCE_TAG}
+      - CLOUDFLARE_ENABLED=${CLOUDFLARE_ENABLED:-true}
+      - ALLOWED_EMAIL_DOMAINS=${ALLOWED_EMAIL_DOMAINS:-}
+      - ENVIRONMENT=${ENVIRONMENT:-prod}
+    env_file:
+      - .env
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Cloudflare tunnel (optional - if running tunnel in Docker)
+  # Uncomment this if you want to run the tunnel in the same compose stack
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: cloudflared-tunnel
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
+  #   environment:
+  #     - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+  #   networks:
+  #     - app-network
+  #   depends_on:
+  #     - app
+
+networks:
+  app-network:
+    driver: bridge

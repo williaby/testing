@@ -1,0 +1,77 @@
+version: '3.8'
+
+# Complete setup with Cloudflare tunnel and multiple applications
+# This example shows how to run multiple apps behind one tunnel
+
+services:
+  # Cloudflare tunnel
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    networks:
+      - tunnel-network
+    depends_on:
+      - app1
+      - app2
+
+  # First application
+  app1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: app1
+    restart: unless-stopped
+    environment:
+      - CLOUDFLARE_TEAM_DOMAIN=${CLOUDFLARE_TEAM_DOMAIN}
+      - CLOUDFLARE_AUDIENCE_TAG=${APP1_AUDIENCE_TAG}
+      - CLOUDFLARE_ENABLED=true
+      - ENVIRONMENT=prod
+    networks:
+      - tunnel-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Second application (example of multiple apps)
+  app2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: app2
+    restart: unless-stopped
+    environment:
+      - CLOUDFLARE_TEAM_DOMAIN=${CLOUDFLARE_TEAM_DOMAIN}
+      - CLOUDFLARE_AUDIENCE_TAG=${APP2_AUDIENCE_TAG}
+      - CLOUDFLARE_ENABLED=true
+      - ENVIRONMENT=prod
+    networks:
+      - tunnel-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  tunnel-network:
+    driver: bridge
+
+# To use this setup:
+# 1. Create a Cloudflare tunnel and get the token
+# 2. Configure tunnel routes in Cloudflare dashboard:
+#    - app1.example.com -> http://app1:8000
+#    - app2.example.com -> http://app2:8000
+# 3. Create two Access Applications in Cloudflare (one for each subdomain)
+# 4. Get the audience tags for each app
+# 5. Set environment variables:
+#    - TUNNEL_TOKEN=your-tunnel-token
+#    - CLOUDFLARE_TEAM_DOMAIN=your-team.cloudflareaccess.com
+#    - APP1_AUDIENCE_TAG=app1-audience-tag
+#    - APP2_AUDIENCE_TAG=app2-audience-tag
+# 6. Run: docker-compose -f docker-compose.tunnel.yml up -d
