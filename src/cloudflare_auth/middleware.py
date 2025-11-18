@@ -56,7 +56,7 @@ from starlette.responses import JSONResponse
 
 from src.cloudflare_auth.models import CloudflareUser
 from src.cloudflare_auth.rate_limiter import InMemoryRateLimiter
-from src.cloudflare_auth.utils import sanitize_email, sanitize_ip, sanitize_path
+from src.cloudflare_auth.utils import get_client_ip, sanitize_email, sanitize_ip, sanitize_path
 from src.cloudflare_auth.validators import CloudflareJWTValidator
 from src.config.settings import CloudflareSettings, get_cloudflare_settings
 
@@ -243,7 +243,7 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
         """
         # Check rate limit
         if self.enable_rate_limiting and self.rate_limiter:
-            client_ip = self._get_client_ip(request)
+            client_ip = get_client_ip(request)
             if not self.rate_limiter.is_allowed(client_ip):
                 retry_after = self.rate_limiter.get_retry_after(client_ip)
                 logger.warning(
@@ -267,7 +267,7 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
                         "Missing Cloudflare JWT header: %s (path: %s, ip: %s)",
                         self.settings.jwt_header_name,
                         sanitize_path(request.url.path),
-                        sanitize_ip(self._get_client_ip(request)),
+                        sanitize_ip(get_client_ip(request)),
                     )
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -283,19 +283,22 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
             claims = self.validator.validate_token(jwt_token)
             user = CloudflareUser.from_jwt_claims(claims)
 
-            # Additional email header validation (optional security check)
+            # Additional email header validation (security check)
+            # Cloudflare sets this header - mismatch indicates potential attack
             email_header = request.headers.get(self.settings.email_header_name)
             if email_header and email_header != user.email:
-                logger.warning(
-                    "Email mismatch: JWT=%s, Header=%s",
+                logger.error(
+                    "SECURITY: Email mismatch detected - potential token manipulation: "
+                    "JWT=%s, Header=%s, IP=%s",
                     sanitize_email(user.email),
                     sanitize_email(email_header),
+                    sanitize_ip(get_client_ip(request)),
                 )
-                if self.require_auth:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Email verification failed",
-                    )
+                # Always fail on mismatch - this is a security issue
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authentication verification failed",
+                )
 
             logger.info(
                 "User authenticated successfully: %s (path: %s)",
@@ -308,7 +311,7 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
         except ValueError as e:
             # Record failed authentication attempt for rate limiting
             if self.enable_rate_limiting and self.rate_limiter:
-                client_ip = self._get_client_ip(request)
+                client_ip = get_client_ip(request)
                 self.rate_limiter.record_attempt(client_ip)
 
             if self.settings.log_auth_failures:
@@ -316,7 +319,7 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
                     "JWT validation failed: %s (path: %s, ip: %s)",
                     str(e),
                     sanitize_path(request.url.path),
-                    sanitize_ip(self._get_client_ip(request)),
+                    sanitize_ip(get_client_ip(request)),
                 )
 
             if self.require_auth:
@@ -328,32 +331,6 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
                 ) from e
             else:
                 return None
-
-    def _get_client_ip(self, request: Request) -> str:
-        """Extract client IP address from request.
-
-        Args:
-            request: The incoming request
-
-        Returns:
-            Client IP address string
-        """
-        # Cloudflare specific headers
-        cf_connecting_ip = request.headers.get("CF-Connecting-IP")
-        if cf_connecting_ip:
-            return cf_connecting_ip
-
-        # Standard forwarding headers
-        forwarded_for = request.headers.get("X-Forwarded-For")
-        if forwarded_for:
-            return forwarded_for.split(",")[0].strip()
-
-        real_ip = request.headers.get("X-Real-IP")
-        if real_ip:
-            return real_ip.strip()
-
-        # Fall back to direct client IP
-        return request.client.host if request.client else "unknown"
 
 
 def setup_cloudflare_auth(
