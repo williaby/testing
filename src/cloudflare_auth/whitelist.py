@@ -23,9 +23,17 @@ Called by:
 from dataclasses import dataclass
 from enum import Enum
 import logging
+import secrets
 from typing import Any
 
 from pydantic import BaseModel, field_validator
+
+try:
+    from email_validator import validate_email, EmailNotValidError
+    EMAIL_VALIDATOR_AVAILABLE = True
+except ImportError:
+    EMAIL_VALIDATOR_AVAILABLE = False
+    EmailNotValidError = None  # type: ignore
 
 
 logger = logging.getLogger(__name__)
@@ -235,6 +243,8 @@ class EmailWhitelistValidator:
     def is_authorized(self, email: str) -> bool:
         """Check if email is authorized via whitelist.
 
+        Uses constant-time comparison to prevent timing attacks.
+
         Args:
             email: Email address to validate
 
@@ -246,23 +256,27 @@ class EmailWhitelistValidator:
 
         normalized_email = self._normalize_email(email)
 
-        # Check individual email whitelist
-        if normalized_email in self.individual_emails:
-            logger.debug("Email %s authorized via individual whitelist", email)
-            return True
+        # Check individual email whitelist using constant-time comparison
+        for allowed_email in self.individual_emails:
+            if secrets.compare_digest(normalized_email, allowed_email):
+                logger.debug("Email %s authorized via individual whitelist", email)
+                return True
 
-        # Check domain patterns
+        # Check domain patterns using constant-time comparison
         if "@" in normalized_email:
             domain = "@" + normalized_email.split("@")[1]
-            if domain in self.domain_patterns:
-                logger.debug("Email %s authorized via domain pattern %s", email, domain)
-                return True
+            for allowed_domain in self.domain_patterns:
+                if secrets.compare_digest(domain, allowed_domain):
+                    logger.debug("Email %s authorized via domain pattern %s", email, domain)
+                    return True
 
         logger.debug("Email %s not authorized", email)
         return False
 
     def is_admin(self, email: str) -> bool:
         """Check if email has admin privileges.
+
+        Uses constant-time comparison to prevent timing attacks.
 
         Args:
             email: Email address to check
@@ -274,12 +288,14 @@ class EmailWhitelistValidator:
             return False
 
         normalized_email = self._normalize_email(email)
-        is_admin_user = normalized_email in self.admin_emails
 
-        if is_admin_user:
-            logger.debug("Email %s has admin privileges", email)
+        # Use constant-time comparison to prevent timing attacks
+        for admin_email in self.admin_emails:
+            if secrets.compare_digest(normalized_email, admin_email):
+                logger.debug("Email %s has admin privileges", email)
+                return True
 
-        return is_admin_user
+        return False
 
     def get_user_role(self, email: str) -> str:
         """Get user role based on email.
@@ -477,10 +493,46 @@ class WhitelistManager:
 
         Returns:
             True if email was added successfully
+
+        Raises:
+            ValueError: If email format is invalid
         """
         try:
+            # Validate input is not empty
+            if not email or not email.strip():
+                raise ValueError("Email cannot be empty")
+
             normalized_email = self.validator._normalize_email(email)
 
+            # Validate email format (if not a domain pattern)
+            if not normalized_email.startswith("@"):
+                if EMAIL_VALIDATOR_AVAILABLE and validate_email is not None:
+                    try:
+                        # Validate email format
+                        valid = validate_email(normalized_email, check_deliverability=False)
+                        normalized_email = valid.normalized if not self.validator.case_sensitive else normalized_email
+                    except EmailNotValidError as e:
+                        raise ValueError(f"Invalid email format: {str(e)}") from e
+                else:
+                    # Basic email validation if email-validator not available
+                    if "@" not in normalized_email or normalized_email.count("@") != 1:
+                        raise ValueError("Invalid email format: must contain exactly one @")
+
+                    local, domain = normalized_email.split("@")
+                    if not local or not domain or "." not in domain:
+                        raise ValueError("Invalid email format")
+
+            # Validate domain pattern format
+            else:
+                # Domain pattern must be @domain.tld format
+                if normalized_email.count("@") != 1:
+                    raise ValueError("Invalid domain pattern: must be @domain.tld")
+
+                domain_part = normalized_email[1:]  # Remove @
+                if not domain_part or "." not in domain_part:
+                    raise ValueError("Invalid domain pattern: must include valid domain")
+
+            # Add to appropriate collection
             if normalized_email.startswith("@"):
                 self.validator.domain_patterns.add(normalized_email)
             else:
@@ -492,9 +544,12 @@ class WhitelistManager:
             logger.info("Added email %s to whitelist (admin: %s)", email, is_admin)
             return True
 
+        except ValueError:
+            # Re-raise validation errors
+            raise
         except Exception as e:
             logger.error("Failed to add email %s to whitelist: %s", email, e)
-            return False
+            raise ValueError(f"Failed to add email: {str(e)}") from e
 
     def remove_email(self, email: str) -> bool:
         """Remove email from whitelist (runtime operation).

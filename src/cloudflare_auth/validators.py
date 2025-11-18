@@ -256,14 +256,19 @@ class CloudflareJWTValidator:
         Cloudflare public keys. Useful for handling key rotation.
 
         Note:
-            PyJWKClient handles key caching automatically. This method
-            is provided for explicit refresh if needed.
+            PyJWKClient handles key caching automatically. Creating a new
+            instance will fetch fresh keys on next validation.
         """
-        if self.jwks_client:
-            # Clear the cache to force refresh on next validation
-            self.jwks_client._cached_keys = {}
+        if self.jwks_client and self.settings.certs_url:
+            # Create a new JWKS client to force key refresh
+            # This is safer than accessing private attributes
+            self.jwks_client = PyJWKClient(
+                self.settings.certs_url,
+                cache_keys=True,
+                max_cached_keys=self.settings.jwt_cache_max_keys,
+            )
             self._last_key_refresh = datetime.now()
-            logger.info("Cloudflare public keys cache cleared")
+            logger.info("Cloudflare public keys client refreshed")
 
     @property
     def is_configured(self) -> bool:

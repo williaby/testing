@@ -55,6 +55,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from src.cloudflare_auth.models import CloudflareUser
+from src.cloudflare_auth.rate_limiter import InMemoryRateLimiter
+from src.cloudflare_auth.utils import sanitize_email, sanitize_ip, sanitize_path
 from src.cloudflare_auth.validators import CloudflareJWTValidator
 from src.config.settings import CloudflareSettings, get_cloudflare_settings
 
@@ -91,6 +93,9 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
         validator: CloudflareJWTValidator | None = None,
         excluded_paths: list[str] | None = None,
         require_auth: bool = True,
+        enable_rate_limiting: bool = True,
+        rate_limit_attempts: int = 5,
+        rate_limit_window: int = 60,
     ) -> None:
         """Initialize Cloudflare authentication middleware.
 
@@ -100,6 +105,9 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
             validator: Optional CloudflareJWTValidator instance
             excluded_paths: List of paths to exclude from authentication
             require_auth: Whether to require authentication (vs. optional)
+            enable_rate_limiting: Whether to enable rate limiting (default: True)
+            rate_limit_attempts: Max authentication attempts per window (default: 5)
+            rate_limit_window: Rate limit window in seconds (default: 60)
         """
         super().__init__(app)
         self.settings = settings or get_cloudflare_settings()
@@ -107,11 +115,22 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
         self.excluded_paths = excluded_paths or []
         self.require_auth = require_auth
 
+        # Rate limiting
+        self.enable_rate_limiting = enable_rate_limiting
+        if enable_rate_limiting:
+            self.rate_limiter = InMemoryRateLimiter(
+                max_attempts=rate_limit_attempts,
+                window_seconds=rate_limit_window,
+            )
+        else:
+            self.rate_limiter = None
+
         # Log configuration
         logger.info(
-            "Cloudflare auth middleware initialized (enabled=%s, require_auth=%s)",
+            "Cloudflare auth middleware initialized (enabled=%s, require_auth=%s, rate_limiting=%s)",
             self.settings.cloudflare_enabled,
             self.require_auth,
+            self.enable_rate_limiting,
         )
 
     def _is_path_excluded(self, path: str) -> bool:
@@ -222,6 +241,22 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
         Called by:
             - dispatch(): During request processing
         """
+        # Check rate limit
+        if self.enable_rate_limiting and self.rate_limiter:
+            client_ip = self._get_client_ip(request)
+            if not self.rate_limiter.is_allowed(client_ip):
+                retry_after = self.rate_limiter.get_retry_after(client_ip)
+                logger.warning(
+                    "Rate limit exceeded for IP: %s (path: %s)",
+                    sanitize_ip(client_ip),
+                    sanitize_path(request.url.path),
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many authentication attempts. Please try again later.",
+                    headers={"Retry-After": str(retry_after)},
+                )
+
         # Extract JWT token from header
         jwt_token = request.headers.get(self.settings.jwt_header_name)
 
@@ -231,8 +266,8 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
                     logger.warning(
                         "Missing Cloudflare JWT header: %s (path: %s, ip: %s)",
                         self.settings.jwt_header_name,
-                        request.url.path,
-                        self._get_client_ip(request),
+                        sanitize_path(request.url.path),
+                        sanitize_ip(self._get_client_ip(request)),
                     )
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -253,8 +288,8 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
             if email_header and email_header != user.email:
                 logger.warning(
                     "Email mismatch: JWT=%s, Header=%s",
-                    user.email,
-                    email_header,
+                    sanitize_email(user.email),
+                    sanitize_email(email_header),
                 )
                 if self.require_auth:
                     raise HTTPException(
@@ -264,25 +299,31 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
 
             logger.info(
                 "User authenticated successfully: %s (path: %s)",
-                user.email,
-                request.url.path,
+                sanitize_email(user.email),
+                sanitize_path(request.url.path),
             )
 
             return user
 
         except ValueError as e:
+            # Record failed authentication attempt for rate limiting
+            if self.enable_rate_limiting and self.rate_limiter:
+                client_ip = self._get_client_ip(request)
+                self.rate_limiter.record_attempt(client_ip)
+
             if self.settings.log_auth_failures:
                 logger.warning(
                     "JWT validation failed: %s (path: %s, ip: %s)",
                     str(e),
-                    request.url.path,
-                    self._get_client_ip(request),
+                    sanitize_path(request.url.path),
+                    sanitize_ip(self._get_client_ip(request)),
                 )
 
             if self.require_auth:
+                # Don't leak error details to potential attackers
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=f"Invalid authentication token: {str(e)}",
+                    detail="Invalid authentication token",
                     headers={"WWW-Authenticate": "Bearer"},
                 ) from e
             else:
