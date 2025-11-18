@@ -148,6 +148,62 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
             for excluded in self.excluded_paths
         )
 
+    def _validate_cloudflare_origin(self, request: Request) -> None:
+        """Validate request came through Cloudflare tunnel.
+
+        This security check ensures requests actually came through the Cloudflare
+        tunnel and not directly to the application (bypassing Cloudflare Access).
+
+        Args:
+            request: The incoming request
+
+        Raises:
+            HTTPException: If request doesn't have required Cloudflare headers
+
+        Security:
+            This prevents attackers who gain network access from bypassing
+            Cloudflare Access by connecting directly to the application.
+        """
+        if not self.settings.require_cloudflare_headers:
+            return
+
+        # Check for Cloudflare Ray ID (present on all CF requests)
+        # This header is added by Cloudflare and cannot be easily spoofed
+        cf_ray = request.headers.get("CF-Ray")
+        if not cf_ray:
+            logger.error(
+                "SECURITY: Missing CF-Ray header - request may not be from Cloudflare (path: %s, ip: %s)",
+                sanitize_path(request.url.path),
+                sanitize_ip(get_client_ip(request)),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied",
+            )
+
+        # Optional: Validate client IP is from allowed tunnel IPs
+        # This restricts access to only the cloudflared tunnel
+        if self.settings.allowed_tunnel_ips:
+            client_ip = get_client_ip(request)
+
+            # Check if IP is in allowlist
+            ip_allowed = any(
+                client_ip == allowed_ip or client_ip.startswith(allowed_ip.rstrip("/") + ".")
+                for allowed_ip in self.settings.allowed_tunnel_ips
+            )
+
+            if not ip_allowed:
+                logger.error(
+                    "SECURITY: Request from unauthorized IP: %s (path: %s). Allowed IPs: %s",
+                    sanitize_ip(client_ip),
+                    sanitize_path(request.url.path),
+                    ", ".join(self.settings.allowed_tunnel_ips),
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied",
+                )
+
     async def dispatch(
         self,
         request: Request,
@@ -182,6 +238,13 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
         if self._is_path_excluded(request.url.path):
             logger.debug("Path excluded from auth: %s", request.url.path)
             return await call_next(request)
+
+        # Validate request came through Cloudflare (security check)
+        # This prevents direct access bypassing the tunnel
+        try:
+            self._validate_cloudflare_origin(request)
+        except HTTPException:
+            raise
 
         # Skip authentication if disabled (development mode)
         if not self.settings.cloudflare_enabled:
@@ -278,15 +341,45 @@ class CloudflareAuthMiddleware(BaseHTTPMiddleware):
                 # Auth not required, return None
                 return None
 
+        # SECURITY: Validate JWT token size to prevent DoS attacks
+        if len(jwt_token) > 8192:  # 8KB limit
+            logger.warning(
+                "SECURITY: JWT token too large: %d bytes (path: %s, ip: %s)",
+                len(jwt_token),
+                sanitize_path(request.url.path),
+                sanitize_ip(get_client_ip(request)),
+            )
+            if self.require_auth:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid authentication token",
+                )
+            return None
+
         # Validate the JWT token
         try:
             claims = self.validator.validate_token(jwt_token)
             user = CloudflareUser.from_jwt_claims(claims)
 
             # Additional email header validation (security check)
-            # Cloudflare sets this header - mismatch indicates potential attack
+            # Cloudflare sets this header - we REQUIRE it for security
             email_header = request.headers.get(self.settings.email_header_name)
-            if email_header and email_header != user.email:
+
+            # CRITICAL SECURITY: Email header must be present when behind Cloudflare
+            if not email_header:
+                logger.error(
+                    "SECURITY: Missing required Cloudflare email header: %s (path: %s, ip: %s)",
+                    self.settings.email_header_name,
+                    sanitize_path(request.url.path),
+                    sanitize_ip(get_client_ip(request)),
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authentication verification failed",
+                )
+
+            # Validate email header matches JWT email
+            if email_header != user.email:
                 logger.error(
                     "SECURITY: Email mismatch detected - potential token manipulation: "
                     "JWT=%s, Header=%s, IP=%s",
