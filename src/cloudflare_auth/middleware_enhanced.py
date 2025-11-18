@@ -47,6 +47,7 @@ from src.cloudflare_auth.csrf import CSRFProtection
 from src.cloudflare_auth.models import CloudflareUser
 from src.cloudflare_auth.rate_limiter import InMemoryRateLimiter
 from src.cloudflare_auth.sessions import SimpleSessionManager
+from src.cloudflare_auth.utils import sanitize_email, sanitize_ip, sanitize_path
 from src.cloudflare_auth.validators import CloudflareJWTValidator
 from src.cloudflare_auth.whitelist import EmailWhitelistValidator, UserTier
 from src.config.settings import CloudflareSettings, get_cloudflare_settings
@@ -248,8 +249,8 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
                 retry_after = self.rate_limiter.get_retry_after(client_ip)
                 logger.warning(
                     "Rate limit exceeded for IP: %s (path: %s)",
-                    client_ip,
-                    request.url.path,
+                    sanitize_ip(client_ip),
+                    sanitize_path(request.url.path),
                 )
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -277,8 +278,8 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
                     logger.warning(
                         "Missing JWT header: %s (path: %s, ip: %s)",
                         self.settings.jwt_header_name,
-                        request.url.path,
-                        self._get_client_ip(request),
+                        sanitize_path(request.url.path),
+                        sanitize_ip(self._get_client_ip(request)),
                     )
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -300,8 +301,8 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
                 logger.warning(
                     "JWT validation failed: %s (path: %s, ip: %s)",
                     str(e),
-                    request.url.path,
-                    self._get_client_ip(request),
+                    sanitize_path(request.url.path),
+                    sanitize_ip(self._get_client_ip(request)),
                 )
 
             if self.require_auth:
@@ -318,7 +319,7 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
             if not self.whitelist_validator.is_authorized(claims.email):
                 logger.warning(
                     "Unauthorized email attempted access: %s",
-                    claims.email,
+                    sanitize_email(claims.email),
                 )
                 if self.require_auth:
                     raise HTTPException(
@@ -359,7 +360,7 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
 
         logger.info(
             "User authenticated: %s (tier: %s, admin: %s)",
-            user.email,
+            sanitize_email(user.email),
             user_tier.value,
             user.is_admin,
         )

@@ -28,6 +28,13 @@ from typing import Any
 
 from pydantic import BaseModel, field_validator
 
+try:
+    from email_validator import validate_email, EmailNotValidError
+    EMAIL_VALIDATOR_AVAILABLE = True
+except ImportError:
+    EMAIL_VALIDATOR_AVAILABLE = False
+    EmailNotValidError = None  # type: ignore
+
 
 logger = logging.getLogger(__name__)
 
@@ -486,10 +493,46 @@ class WhitelistManager:
 
         Returns:
             True if email was added successfully
+
+        Raises:
+            ValueError: If email format is invalid
         """
         try:
+            # Validate input is not empty
+            if not email or not email.strip():
+                raise ValueError("Email cannot be empty")
+
             normalized_email = self.validator._normalize_email(email)
 
+            # Validate email format (if not a domain pattern)
+            if not normalized_email.startswith("@"):
+                if EMAIL_VALIDATOR_AVAILABLE and validate_email is not None:
+                    try:
+                        # Validate email format
+                        valid = validate_email(normalized_email, check_deliverability=False)
+                        normalized_email = valid.normalized if not self.validator.case_sensitive else normalized_email
+                    except EmailNotValidError as e:
+                        raise ValueError(f"Invalid email format: {str(e)}") from e
+                else:
+                    # Basic email validation if email-validator not available
+                    if "@" not in normalized_email or normalized_email.count("@") != 1:
+                        raise ValueError("Invalid email format: must contain exactly one @")
+
+                    local, domain = normalized_email.split("@")
+                    if not local or not domain or "." not in domain:
+                        raise ValueError("Invalid email format")
+
+            # Validate domain pattern format
+            else:
+                # Domain pattern must be @domain.tld format
+                if normalized_email.count("@") != 1:
+                    raise ValueError("Invalid domain pattern: must be @domain.tld")
+
+                domain_part = normalized_email[1:]  # Remove @
+                if not domain_part or "." not in domain_part:
+                    raise ValueError("Invalid domain pattern: must include valid domain")
+
+            # Add to appropriate collection
             if normalized_email.startswith("@"):
                 self.validator.domain_patterns.add(normalized_email)
             else:
@@ -501,9 +544,12 @@ class WhitelistManager:
             logger.info("Added email %s to whitelist (admin: %s)", email, is_admin)
             return True
 
+        except ValueError:
+            # Re-raise validation errors
+            raise
         except Exception as e:
             logger.error("Failed to add email %s to whitelist: %s", email, e)
-            return False
+            raise ValueError(f"Failed to add email: {str(e)}") from e
 
     def remove_email(self, email: str) -> bool:
         """Remove email from whitelist (runtime operation).
