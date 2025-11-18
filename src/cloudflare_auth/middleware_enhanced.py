@@ -246,6 +246,21 @@ class CloudflareAuthMiddlewareEnhanced(BaseHTTPMiddleware):
                 )
             return None
 
+        # Security: Validate JWT token size (prevent DoS)
+        if len(jwt_token) > 8192:  # 8KB limit
+            logger.warning(
+                "JWT token too large: %d bytes (path: %s, ip: %s)",
+                len(jwt_token),
+                request.url.path,
+                self._get_client_ip(request),
+            )
+            if self.require_auth:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="JWT token too large",
+                )
+            return None
+
         # Validate JWT token
         try:
             claims = self.jwt_validator.validate_token(jwt_token)

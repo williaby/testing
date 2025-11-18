@@ -43,6 +43,12 @@ from src.cloudflare_auth.middleware_enhanced import (
     setup_cloudflare_auth_enhanced,
 )
 from src.cloudflare_auth.models import CloudflareJWTClaims, CloudflareUser
+from src.cloudflare_auth.security_helpers import (
+    AuditLogger,
+    SecurityHeadersMiddleware,
+    create_session_cleanup_task,
+    get_audit_logger,
+)
 from src.cloudflare_auth.sessions import SimpleSessionManager
 from src.cloudflare_auth.validators import CloudflareJWTValidator
 from src.cloudflare_auth.whitelist import (
@@ -69,6 +75,11 @@ __all__ = [
     # Whitelist Management
     "WhitelistManager",
     "create_validator_from_env",
+    # Security Helpers
+    "SecurityHeadersMiddleware",
+    "AuditLogger",
+    "get_audit_logger",
+    "create_session_cleanup_task",
     # Dependencies
     "get_current_user",
     "get_current_user_optional",
