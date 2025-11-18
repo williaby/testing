@@ -19,11 +19,15 @@ Called by:
     - src.cloudflare_auth.validators: For JWT validation settings
 """
 
+import logging
 from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+logger = logging.getLogger(__name__)
 
 
 class CloudflareSettings(BaseSettings):
@@ -109,6 +113,17 @@ class CloudflareSettings(BaseSettings):
         description="Log authentication failures for security monitoring",
     )
 
+    # Cloudflare Origin Validation (Tunnel Security)
+    require_cloudflare_headers: bool = Field(
+        default=True,
+        description="Require Cloudflare headers to prove request came through tunnel (recommended for production)",
+    )
+
+    allowed_tunnel_ips: list[str] = Field(
+        default_factory=lambda: ["127.0.0.1", "::1"],
+        description="IP addresses allowed to connect (tunnel IPs). Empty list = allow all (not recommended).",
+    )
+
     # Header Configuration
     jwt_header_name: str = Field(
         default="Cf-Access-Jwt-Assertion",
@@ -140,6 +155,59 @@ class CloudflareSettings(BaseSettings):
         default="strict",
         description="SameSite cookie attribute (strict, lax, or none)",
     )
+
+    @field_validator("cloudflare_enabled")
+    @classmethod
+    def validate_cloudflare_enabled(cls, v: bool, info) -> bool:
+        """Validate Cloudflare authentication is enabled in production.
+
+        Args:
+            v: cloudflare_enabled value
+            info: Field validation info
+
+        Returns:
+            Validated cloudflare_enabled value
+
+        Raises:
+            ValueError: If disabled in production environment
+        """
+        # Get environment from validation context
+        environment = info.data.get("environment", "dev")
+
+        # CRITICAL: Prevent disabling auth in production
+        if not v and environment in ["prod", "production"]:
+            raise ValueError(
+                "\n" + "="*80 + "\n"
+                "🔴 SECURITY ERROR: cloudflare_enabled=False in PRODUCTION! 🔴\n"
+                "="*80 + "\n"
+                "Cloudflare authentication is DISABLED in a production environment.\n"
+                "This completely disables all authentication and authorization.\n"
+                "\n"
+                "ALL ENDPOINTS WILL BE PUBLICLY ACCESSIBLE WITHOUT AUTHENTICATION!\n"
+                "\n"
+                "To fix this, set: CLOUDFLARE_ENABLED=true\n"
+                "="*80 + "\n"
+            )
+
+        # Warning for non-production environments
+        if not v:
+            warning_msg = (
+                "\n" + "="*80 + "\n"
+                "⚠️  SECURITY WARNING: AUTHENTICATION DISABLED ⚠️\n"
+                "="*80 + "\n"
+                f"Environment: {environment}\n"
+                "Cloudflare authentication is currently DISABLED.\n"
+                "All endpoints are publicly accessible without authentication.\n"
+                "\n"
+                "This should ONLY be used in local development environments.\n"
+                "\n"
+                "To enable authentication, set: CLOUDFLARE_ENABLED=true\n"
+                "="*80 + "\n"
+            )
+            logger.warning(warning_msg)
+            print(warning_msg, flush=True)  # Also print to console
+
+        return v
 
     @field_validator("cloudflare_team_domain")
     @classmethod
