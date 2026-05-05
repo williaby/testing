@@ -5,7 +5,7 @@
 # Update regularly and test thoroughly before deploying
 
 # Core FastAPI dependencies
-fastapi==0.115.0
+fastapi==0.136.1
 uvicorn[standard]==0.32.0
 python-multipart==0.0.12
 
