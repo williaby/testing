@@ -1,0 +1,119 @@
+name: SonarCloud
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-secrets:
+    name: Check Configuration
+    runs-on: ubuntu-latest
+    outputs:
+      has-token: ${{ steps.check.outputs.has-token }}
+    steps:
+      - name: Check for SONAR_TOKEN
+        id: check
+        run: |
+          if [ -n "${{ secrets.SONAR_TOKEN }}" ]; then
+            echo "has-token=true" >> $GITHUB_OUTPUT
+            echo "::notice::SONAR_TOKEN is configured. SonarCloud analysis will run."
+          else
+            echo "has-token=false" >> $GITHUB_OUTPUT
+            echo "::warning::SONAR_TOKEN is not configured. Skipping SonarCloud analysis."
+          fi
+
+  sonarcloud:
+    name: SonarCloud Analysis
+    runs-on: ubuntu-latest
+    needs: check-secrets
+    if: needs.check-secrets.outputs.has-token == 'true'
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Check for Python code
+        id: check-code
+        run: |
+          if find src -name '*.py' -type f 2>/dev/null | grep -q .; then
+            echo "has-code=true" >> $GITHUB_OUTPUT
+          else
+            echo "has-code=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Python
+        if: steps.check-code.outputs.has-code == 'true'
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install UV
+        if: steps.check-code.outputs.has-code == 'true'
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        if: steps.check-code.outputs.has-code == 'true'
+        run: uv sync --frozen --all-extras
+
+      - name: Run tests with coverage
+        if: steps.check-code.outputs.has-code == 'true'
+        run: |
+          uv run pytest \
+            --cov=src \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term \
+            --cov-branch \
+            -v
+        continue-on-error: true
+
+      - name: Verify coverage report
+        if: steps.check-code.outputs.has-code == 'true'
+        run: |
+          if [ ! -f coverage.xml ]; then
+            echo "::warning::Coverage report not found."
+            echo '<?xml version="1.0" ?><coverage version="1.0"></coverage>' > coverage.xml
+          else
+            echo "Coverage report generated"
+          fi
+
+      - name: SonarCloud Scan
+        if: steps.check-code.outputs.has-code == 'true'
+        uses: SonarSource/sonarqube-scan-action@884b79409bbd464b2a59edc326a4b77dc56b2195 # v4.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.organization=williaby
+            -Dsonar.projectKey=williaby_testing
+            -Dsonar.python.version=3.12
+
+      - name: Check Quality Gate
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        continue-on-error: true
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
+        with:
+          name: coverage-sonarcloud
+          path: coverage.xml
+          retention-days: 7
