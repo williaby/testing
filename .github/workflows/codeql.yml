@@ -1,17 +1,30 @@
 # CodeQL Security Analysis
 # Performs static application security testing (SAST) using GitHub CodeQL.
 #
+# Features:
+#   - Python language analysis with security-extended + security-and-quality queries
+#   - Triggered on push to main, pull_request, and weekly schedule
+#   - SARIF results uploaded to GitHub Security tab (public repo; GHAS included)
+#   - Supply chain hardened with pinned SHA refs
+#
 # IMPORTANT: GitHub's CodeQL "default setup" must remain DISABLED for this repo.
 # Default setup and custom advanced configuration cannot both upload SARIF to the
-# Security tab. To verify or disable: Settings > Code security > Code scanning > Default setup.
+# Security tab -- GitHub rejects the custom upload with "analyses from advanced
+# configurations cannot be processed when the default setup is enabled."
+# To verify or disable: Settings > Code security > Code scanning > Default setup.
 name: CodeQL Analysis
 
 on:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
   pull_request:
-    branches: [main, master]
+    branches:
+      - main
+      - master
   schedule:
+    # Weekly scan on Mondays at 07:00 UTC
     - cron: "0 7 * * 1"
   workflow_dispatch:
 
@@ -42,19 +55,6 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
-        with:
-          python-version: "3.12"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
-        with:
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --no-dev
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@48ab28a6f5dbc2a99bf1e0131198dd8f1df78169 # v3.28.0
