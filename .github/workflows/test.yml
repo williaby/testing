@@ -65,7 +65,3 @@ jobs:
       - name: Run Bandit
         run: |
           bandit -r cloudflare_tunnel_auth/ -ll
-
-      - name: Run Safety
-        run: |
-          safety check --json || true
